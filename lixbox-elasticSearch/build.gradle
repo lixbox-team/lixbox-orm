@@ -19,8 +19,14 @@ project(':lixbox-elasticSearch'){
 
 
         // ================================ Test ================================
+        testImplementation group: 'org.junit.jupiter', name: 'junit-jupiter-api', version: '5.11.3'
+        testImplementation group: 'org.junit.jupiter', name: 'junit-jupiter-engine', version: '5.11.3'
         testImplementation group: 'org.junit.jupiter', name: 'junit-jupiter', version: '5.11.3'
 	}
+	
+	tasks.withType(Test) {
+        useJUnitPlatform()
+    }
     
     jar{
        manifest {

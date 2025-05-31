@@ -27,7 +27,6 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
@@ -53,6 +52,7 @@ import fr.lixbox.common.exceptions.ProcessusException;
 import fr.lixbox.common.util.CollectionUtil;
 import fr.lixbox.common.util.ExceptionUtil;
 import fr.lixbox.orm.entity.model.NoSqlSearchDao;
+import fr.lixbox.orm.entity.model.PaginatedResult;
 
 /**
  * Cette classe interface l'univers ElasticSearch avec l'univers POJO.
@@ -61,7 +61,7 @@ import fr.lixbox.orm.entity.model.NoSqlSearchDao;
  */
 public class ElasticSearchClient implements Serializable
 {    
-	// ----------- Attibuts -----------
+    // ----------- Attibuts -----------
     private static final long serialVersionUID = 202410181620L;
     private static final Log LOG = LogFactory.getLog(ElasticSearchClient.class);
     private static final String SERVICE_CODE = "ESCLI";
@@ -102,13 +102,14 @@ public class ElasticSearchClient implements Serializable
             return object;
         }
         
-        ElasticsearchClient client = getElasticSearchClient();
+        ElasticsearchClient client = core();
         try ( ByteArrayInputStream inputStream = 
                 new ByteArrayInputStream(object.toString().getBytes(StandardCharsets.UTF_8));)
         {
             IndexRequest<Object> esRequest = IndexRequest.of(esIdx -> esIdx
                 .index(filterIndexName(object.getClass().getCanonicalName()))
                 .withJson(inputStream)
+                .id(object.getOid())
             );
             IndexResponse response = client.index(esRequest);
             LOG.debug("Indexation sous : "+response.id()+" de l'objet "+object.toString());
@@ -139,7 +140,7 @@ public class ElasticSearchClient implements Serializable
      * @throws IOException
      */
     public <T extends NoSqlSearchDao> List<T> merge(List<T> objects) 
-		throws BusinessException, IOException
+        throws BusinessException, IOException
     {
         if (CollectionUtil.isEmpty(objects))
         {
@@ -154,28 +155,36 @@ public class ElasticSearchClient implements Serializable
     
     
     
+    /**
+     * Cette methode assure la suppression physique d'une entité
+     * 
+     * @param entityClass classe de l'objet
+     * @param id 
+     * 
+     * @throws BusinessException
+     */
     public <T extends NoSqlSearchDao> void remove(Class<T> entityClass, String id) 
-		throws BusinessException
+        throws BusinessException
     {
-    	ElasticsearchClient client = getElasticSearchClient();
-		try 
-		{
-			DeleteRequest deleteRequest = DeleteRequest.of(req -> req
-	                .index(filterIndexName(entityClass.getCanonicalName()))
-	                .id(id));
+        ElasticsearchClient client = core();
+        try 
+        {
+            DeleteRequest deleteRequest = DeleteRequest.of(req -> req
+                    .index(filterIndexName(entityClass.getCanonicalName()))
+                    .id(id));
 
-			DeleteResponse deleteResponse = client.delete(deleteRequest);
+            DeleteResponse deleteResponse = client.delete(deleteRequest);
 
-			// Retourner si la suppression est réussie
-			if (!deleteResponse.result().jsonValue().equals("deleted"))
-			{
-				throw new ProcessusException("Failed to remove document "+id);
-			}
-		} 
-		catch (Exception e) 
-		{
+            // Retourner si la suppression est réussie
+            if (!deleteResponse.result().jsonValue().equals("deleted"))
+            {
+                throw new ProcessusException("Failed to remove document "+id);
+            }
+        } 
+        catch (Exception e) 
+        {
             ExceptionUtil.traiterException(e, ElasticSearchClient.SERVICE_CODE, true);
-		}
+        }
     }
     
 
@@ -192,10 +201,10 @@ public class ElasticSearchClient implements Serializable
      * @throws BusinessException
      */
     @SuppressWarnings("unchecked")
-	public <T extends NoSqlSearchDao> T findById(Class<T> entityClass, String id) 
+    public <T extends NoSqlSearchDao> T findById(Class<T> entityClass, String id) 
         throws BusinessException, IOException
     {
-    	ElasticsearchClient client = getElasticSearchClient();
+        ElasticsearchClient client = core();
         T dao = null;
         try
         {
@@ -208,6 +217,10 @@ public class ElasticSearchClient implements Serializable
             if (getResponse.found()) 
             {
                 dao = (T) getResponse.source();
+                if (dao!=null)
+                {
+                    dao.setOid(getResponse.id());
+                }
             } 
         }
         catch (Exception e)
@@ -225,35 +238,120 @@ public class ElasticSearchClient implements Serializable
     
     
     /**
-     * Cette methode effectue une recherche à partir d'une requête forgée.
+     * Cette methode détermine le nombre de résultats à partir d'une requête forgée.
      * 
      * @param entityClass
      * @param query 
+     * @param from
+     * @param size
+     * 
+     * @return le nombre d'objets correspondants
+     * 
+     * @throws BusinessException
+     * @throws IOException 
+     */
+    public long existByQuery(Class<? extends NoSqlSearchDao> entityClass, Query query, int from, int size) 
+        throws BusinessException, IOException 
+    {
+        long result = 0;        
+        ElasticsearchClient client = core();
+        try
+        {
+            SearchRequest searchRequest = new SearchRequest.Builder()
+                .index(filterIndexName(entityClass.getCanonicalName()))
+                .query(query)
+                .from(from)
+                .size(size)
+                .build();
+            SearchResponse<? extends NoSqlSearchDao> searchResponse = (SearchResponse<? extends NoSqlSearchDao>) client.search(searchRequest, entityClass);
+            result=searchResponse.hits().total().value();
+        }
+        catch (Exception e)
+        {
+            ExceptionUtil.traiterException(e, SERVICE_CODE, false);
+        }
+        finally
+        {
+            LOG.debug(MSG_FERMETURE_DU_CLIENT_EN_COURS+client.toString());
+            client._transport().close();
+        }
+        return result;
+    }
+
+    
+    
+    /**
+     * Cette methode détermine le nombre de résultats à partir d'une requête forgée.
+     * 
+     * @param entityClass
+     * @param expression 
+     * @param from
+     * @param size
+     * 
+     * @return le nombre d'objets correspondants
+     * 
+     * @throws BusinessException
+     * @throws IOException 
+     */
+    public long existByExpression(Class<? extends NoSqlSearchDao> entityClass, String expression, int from, int size) 
+        throws BusinessException, IOException 
+    {
+        long result = 0;
+        try
+        {
+            Query query = QueryBuilders.queryString(m -> m.query(expression));
+            result = this.existByQuery(entityClass, query, from, size);
+        }
+        catch (Exception e)
+        {
+            ExceptionUtil.traiterException(e, SERVICE_CODE, true);
+        }
+        return result;
+    }
+
+    
+    
+    /**
+     * Cette methode effectue une recherche Ã  partir d'une requÃªte forgÃ©e.
+     * 
+     * @param entityClass
+     * @param query
+     * @param from
+     * @param size 
      * 
      * @return liste des objets correspondants
      * 
      * @throws BusinessException
      * @throws IOException
      */
-    @SuppressWarnings("unchecked")
-	public <T extends NoSqlSearchDao> List<T> findByQuery(Class<? extends NoSqlSearchDao> entityClass, Query query) 
+    @SuppressWarnings({ "unchecked"})
+    public <T extends NoSqlSearchDao> PaginatedResult<T> findByQuery(Class<? extends NoSqlSearchDao> entityClass, Query query, int from, int size) 
         throws BusinessException, IOException 
     {
-        List<T> daos = new ArrayList<>();
-        ElasticsearchClient client = getElasticSearchClient();
+        PaginatedResult<T> result = new PaginatedResult<>();
+        
+        ElasticsearchClient client = core();
         try
         {
             SearchRequest searchRequest = new SearchRequest.Builder()
                 .index(filterIndexName(entityClass.getCanonicalName()))
                 .query(query)
+                .from(from)
+                .size(size)
                 .build();
             SearchResponse<T> searchResponse = (SearchResponse<T>) client.search(searchRequest, entityClass);
     
             List<Hit<T>> hits = searchResponse.hits().hits();
-            LOG.debug("Réponse contient : "+searchResponse.hits().total());
+            LOG.debug("REPONSE CONTIENT : "+searchResponse.hits().total());
+            
+            result.setPageSize(size);
+            result.setOffset(from);
+            result.setTotalItems(searchResponse.hits().total().value());
             for (Hit<T> hit : hits) 
             {
-                daos.add(hit.source());
+                T dao = hit.source();
+                dao.setOid(hit.id());
+                result.getItems().add(dao);
             }
         }
         catch (Exception e)
@@ -265,49 +363,43 @@ public class ElasticSearchClient implements Serializable
             LOG.debug(MSG_FERMETURE_DU_CLIENT_EN_COURS+client.toString());
             client._transport().close();
         }
-        return daos;
+        return result;
     }
     
-
-
-    public <T extends NoSqlSearchDao> List<T> findByExpression(Class<T> entityClass, String expression) 
+    
+    
+    /**
+     * Cette methode effectue une recherche Ã  partir d'une requÃªte forgÃ©e.
+     * 
+     * @param entityClass
+     * @param expression
+     * @param from
+     * @param size 
+     * 
+     * @return liste des objets correspondants
+     * 
+     * @throws BusinessException
+     * @throws IOException
+     */
+    public <T extends NoSqlSearchDao> PaginatedResult<T> findByExpression(Class<T> entityClass, String expression, int from, int size) 
         throws BusinessException, IOException
     {
-        List<T> daos = new ArrayList<>();
-        ElasticsearchClient client = getElasticSearchClient();
+        PaginatedResult<T> result = new PaginatedResult<>();
         try
         {
-            Query query = QueryBuilders.queryString(m -> m.query(expression)
-            );
-            SearchRequest searchRequest = new SearchRequest.Builder()
-                .index(filterIndexName(entityClass.getCanonicalName()))
-                .query(query)
-                .build();
-    
-            SearchResponse<T> searchResponse = client.search(searchRequest, entityClass);
-    
-            List<Hit<T>> hits = searchResponse.hits().hits();
-            LOG.debug("Réponse contient : "+searchResponse.hits().total());
-            for (Hit<T> hit : hits) 
-            {
-                daos.add(hit.source());
-            }
+            Query query = QueryBuilders.queryString(m -> m.query(expression));
+            result = this.findByQuery(entityClass, query, from, size);
         }
         catch (Exception e)
         {
             ExceptionUtil.traiterException(e, SERVICE_CODE, true);
         }
-        finally
-        {
-            LOG.debug(MSG_FERMETURE_DU_CLIENT_EN_COURS+client.toString());
-            client._transport().close();
-        }
-        return daos;
+        return result;
     }
 
-
     
-    private ElasticsearchClient getElasticSearchClient()
+    
+    public ElasticsearchClient core()
     {
         LOG.debug("URI du service ElasticSearch: "+elasticSearchProtocol+"://"+elasticSearchHost+":"+elasticSearchPort);
         RestClient restClient = RestClient.builder(

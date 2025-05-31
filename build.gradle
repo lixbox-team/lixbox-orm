@@ -2,21 +2,21 @@
 buildscript {
     repositories {
         maven {
-            url "https://plugins.gradle.org/m2"
+            url = "https://plugins.gradle.org/m2"
         }
     }
     dependencies {
         classpath (group: 'fr.lixbox.plugins', name: 'lixbox-gradle-plugins', version: '11.1.0.19')
+        classpath "org.sonarsource.scanner.gradle:sonarqube-gradle-plugin:6.0.0.5145"
         classpath 'org.owasp:dependency-check-gradle:6.2.2'
-        classpath 'org.postgresql:postgresql:42.2.23'
-        classpath('com.google.guava:guava:30.1.1-jre')
+        classpath 'org.postgresql:postgresql:42.7.5'
+        classpath('com.google.guava:guava:3.4.0-jre')
     }
 }
 plugins {
-    id "org.sonarqube" version "3.5.0.2730"
-    id "com.github.jk1.dependency-license-report" version "1.16"
+    id "com.github.jk1.dependency-license-report" version "2.9"
     id "org.ajoberstar.grgit" version "4.1.1"
-    id "com.github.spotbugs" version "4.7.10"
+    id "com.github.spotbugs" version "6.1.7"
     id 'maven-publish'
 }
 
@@ -49,6 +49,7 @@ apply from: 'gradle/project-critical-update.gradle'
 import org.ajoberstar.grgit.Credentials
 import  org.ajoberstar.grgit.Person
 import groovy.io.FileType
+import com.github.spotbugs.snom.Effort
 
 sonarqube  {
     properties {
@@ -59,6 +60,8 @@ sonarqube  {
         property "sonar.host.url", "${config.pic.sonar.uri}"
         property "sonar.login", System.getProperty("jenkins.login")
         property "sonar.password", System.getProperty("jenkins.password")
+        property "sonar.links.scm", "${config.pic.git.uri}"
+        property "sonar.links.ci", "${config.pic.jenkins.uri}"
     }
 }
 
@@ -67,17 +70,22 @@ allprojects {
     group = "$config.desc_project.artefact.group"    
     version=fix_version
     repositories{
-        mavenLocal()
         mavenCentral()
+        google()
+        gradlePluginPortal()
+        mavenLocal()
         maven{
-            url jarRepoUrl
+            url = jarRepoUrl
             credentials{
                 username = System.getProperty("jenkins.login")
                 password = System.getProperty("jenkins.password")
             }
         }
-    }       
+    }
     task cleanDownloadDir(type: Delete) { delete "$buildDir/download" }
+    tasks.withType(Test) {
+        useJUnitPlatform()
+    }
 }
 
 
@@ -99,11 +107,11 @@ task tagRelease() {
 }
     
 sonarQuality{
-    projectKey "${config.desc_project.artefact.projectKey}"
-    sonarUrl "${config.pic.sonar.uri}"
+    projectKey = "${config.desc_project.artefact.projectKey}"
+    sonarUrl = "${config.pic.sonar.uri}"
     utilisateur = System.getProperty("jenkins.login")
     password = System.getProperty("jenkins.password")
-    waitingTime 10000
+    waitingTime = 10000
 }
 
 
@@ -119,22 +127,30 @@ subprojects {
     apply plugin: 'signing'
 
     repositories {
-	        maven{
-	            url snapshotsRepoUrl
-	            credentials{
-	                username = System.getProperty("jenkins.login")
-	                password = System.getProperty("jenkins.password")
-	            }
-	        }
+        mavenCentral()
+        google()
+        gradlePluginPortal()
+        mavenLocal()
+        maven{
+            url = snapshotsRepoUrl
+            credentials{
+                username = System.getProperty("jenkins.login")
+                password = System.getProperty("jenkins.password")
+            }
+        }
+    }
+    
+    test {
+      useJUnitPlatform()
     }
 
     task javadocJar(type: Jar) {
-	    classifier = 'javadoc'
-	    from javadoc
+        archiveClassifier.set('javadoc')
+        from javadoc
 	}
 	
 	task sourcesJar(type: Jar) {
-	    classifier = 'sources'
+	    archiveClassifier = 'sources'
 	    from sourceSets.main.allSource
 	}
 	
@@ -187,7 +203,7 @@ subprojects {
         }
         repositories {
             maven {
-                url maven_url
+                url = maven_url
                 credentials{
 	                username = System.getProperty("jenkins.login")
 	                password = System.getProperty("jenkins.password")
@@ -196,7 +212,7 @@ subprojects {
             if (isProd)
             {
     			maven {
-	                url config.pic.mavencentral.uri
+	                url = config.pic.mavencentral.uri
 	                credentials{
 		                username = System.getProperty("mavencentral.login")
 		                password = System.getProperty("mavencentral.password")
@@ -210,9 +226,11 @@ subprojects {
 	signing {
 	    sign publishing.publications.mavenJava
 	}
-    
-    sourceCompatibility = 11
-    targetCompatibility = 11
+	
+    java {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
     compileJava.options.encoding = 'UTF-8'
     
     
@@ -271,27 +289,36 @@ subprojects {
         }
     }
     
-    jacocoTestReport {
-        reports {
-            xml.enabled true
-            csv.enabled false
-            html.destination file("${buildDir}/reports/jacoco")
+    sonarqube  {
+        properties {
+            property "sonar.coverage.jacoco.xmlReportPaths", "${buildDir}/reports/jacoco/xml/jacocoTestReport.xml"
+            property "sonar.dependencyCheck.htmlReportPath","${buildDir}/reports/dependency-check/dependency-check-report.html"
+            property "sonar.java.spotbugs.reportPaths","${buildDir}/reports/spotbugs/main.xml"
         }
     }
-
+    
+    jacocoTestReport {
+        reports {
+            xml.required.set(true)
+            csv.required.set(false)
+            html.required.set(true)
+            html.outputLocation = file("${buildDir}/reports/jacoco/html")
+            xml.outputLocation = file("${buildDir}/reports/jacoco/xml/jacocoTestReport.xml")
+        }
+    }
     spotbugs {
-        effort = 'max'
+        effort = Effort.MAX
         excludeFilter=file('../gradle/config/findbugsExcludeFilter.xml')
     }
     spotbugsMain {
         reports {
-            xml.enabled = false
+            xml.enabled = true
             html.enabled = true
         }
     }
     spotbugsTest {
         reports {
-            xml.enabled = false
+            xml.enabled = true
             html.enabled = true
         }
     }
@@ -305,7 +332,7 @@ subprojects {
     
     
 	test{
-		forkEvery 1
+		forkEvery = 1
 		beforeTest { descr ->
 			logger.warn("Starting Test ${descr.className} : ${descr.name}")
 		}
