@@ -35,7 +35,6 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.Date;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.BeforeAll;
@@ -44,6 +43,7 @@ import org.junit.jupiter.api.Test;
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch._types.query_dsl.QueryBuilders;
 import fr.lixbox.common.util.StringUtil;
+import fr.lixbox.orm.entity.model.PaginatedResult;
 import fr.lixbox.orm.es.client.ElasticSearchClient;
 import fr.lixbox.orm.es.model.DataflowContainer;
 import fr.lixbox.orm.es.model.DataflowInfo;
@@ -265,9 +265,9 @@ class TestElasticSearchClient
             Query query = QueryBuilders.queryString(m -> m
                     .query("metadatas.route contains getDaoByQuery_dataflowInfos-17296105*")
             );
-            List<DataflowInfo> dataflowInfos = elasticSearchClient.findByQuery( DataflowInfo.class, query);
+            PaginatedResult<DataflowInfo> dataflowInfos = elasticSearchClient.findByQuery( DataflowInfo.class, query, 0, 10);
             assertNotNull(dataflowInfos);
-            assertTrue(dataflowInfos.size()>=1);
+            assertTrue(dataflowInfos.getItems().size()>=1);
         } 
         catch (Exception e) 
         {
