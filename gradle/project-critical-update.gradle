@@ -2,6 +2,11 @@ println "======================================== critical updates =============
 subprojects {
     configurations.all {
         resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+            if (details.requested.group.contains('commons-beanutils') && 
+                details.requested.name.contains('commons-beanutils')) {
+                    println "correction cve-commons-beanutils <1.11.0"
+                    details.useVersion '1.11.0'
+            }
             if (details.requested.group.contains('org.apache.bcel') && 
                     details.requested.name.contains('bcel') &&
                     details.requested.version.contains('6.5.0')) {

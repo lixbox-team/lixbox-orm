@@ -85,8 +85,8 @@ project(':lixbox-elasticSearch'){
         }
     }
     tasks.clean.dependsOn(tasks.pullElasticSearchImage);
-    tasks.createElasticSearchContainer.dependsOn(tasks.removeElasticSearchContainer);
     tasks.removeElasticSearchContainer.dependsOn(tasks.stopElasticSearchContainer);
     tasks.startElasticSearchContainer.dependsOn(tasks.createElasticSearchContainer);
     tasks.test.dependsOn(tasks.startElasticSearchContainer);
+    tasks.test.finalizedBy(tasks.removeElasticSearchContainer);
 }
