@@ -27,12 +27,16 @@ import java.io.Serializable;
 import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.annotation.PreDestroy;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -53,6 +57,8 @@ import fr.lixbox.orm.redis.model.RedisSearchDao;
 import redis.clients.jedis.Connection;
 import redis.clients.jedis.JedisPooled;
 import redis.clients.jedis.exceptions.JedisDataException;
+import redis.clients.jedis.params.ScanParams;
+import redis.clients.jedis.resps.ScanResult;
 import redis.clients.jedis.search.Document;
 import redis.clients.jedis.search.IndexDefinition;
 import redis.clients.jedis.search.IndexOptions;
@@ -78,6 +84,8 @@ public class ExtendRedisClient implements Serializable
     private int port=0;
     private String redisUri="";
 
+    private transient AtomicReference<JedisPooled> cachedJedisPooled = new AtomicReference<>();
+    private transient Object jedisLock = new Object();
 
     
     //----------- Methodes -----------
@@ -90,9 +98,12 @@ public class ExtendRedisClient implements Serializable
         poolConfig.setMaxIdle(size);
         poolConfig.setMinIdle(1);
         poolConfig.setTestWhileIdle(true);
+        poolConfig.setTimeBetweenEvictionRuns(Duration.ofSeconds(30));
+        poolConfig.setMinEvictableIdleTime(Duration.ofMinutes(2));
+        poolConfig.setSoftMinEvictableIdleTime(Duration.ofMinutes(5));
         poolConfig.setNumTestsPerEvictionRun(10);
-        poolConfig.setBlockWhenExhausted(false);
-        poolConfig.setTestWhileIdle(true);
+        poolConfig.setBlockWhenExhausted(true);
+        poolConfig.setMaxWait(Duration.ofMillis(5000));
         return poolConfig;
     }
     
@@ -123,17 +134,27 @@ public class ExtendRedisClient implements Serializable
     
     
     
-    public List<String> getKeys(String pattern)
-    {
-        List<String> result = new ArrayList<>(); 
-        try (JedisPooled redisClient = getJedisPooled())
-        {
-            String internamPattern = StringUtil.isEmpty(pattern)?"*":pattern;
-            result.addAll(redisClient.keys(internamPattern));
-        }
-        return result;
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        this.poolConfig = getConfigForPool(20);
+        this.cachedJedisPooled = new AtomicReference<>();
+        this.jedisLock = new Object();
     }
-    
+
+	public List<String> getKeys(String pattern) {
+    	List<String> result = new ArrayList<>();
+    	String matchPattern = StringUtil.isEmpty(pattern) ? "*" : pattern;
+    	try (JedisPooled redisClient = getJedisPooled()) {
+    		ScanParams params = new ScanParams().match(matchPattern).count(1000);
+    		String cursor = ScanParams.SCAN_POINTER_START;
+    		do {
+    			ScanResult<String> scanResult = redisClient.scan(cursor, params);
+    			result.addAll(scanResult.getResult());
+    			cursor = scanResult.getCursor();
+    		} while (!ScanParams.SCAN_POINTER_START.equals(cursor));
+    	}
+    	return result;
+    }
     
     
     /**
@@ -220,36 +241,34 @@ public class ExtendRedisClient implements Serializable
     
     
     
-    public boolean clearDb()
-    {
-        boolean result = false;
-        List<String> keys = getKeys("*");
-        if (CollectionUtil.isNotEmpty(keys))
-        {
-            try (JedisPooled redisClient = getJedisPooled())
-            {
-                if (redisClient.del(keys.toArray(new String[0]))>0)
-                {
-                    result = true;
-                }
-            }
-        }
-        return result;
+    public boolean clearDb() {
+    	long deleted = 0;
+    	try (JedisPooled redisClient = getJedisPooled()) {
+    		ScanParams params = new ScanParams().match("*").count(1000);
+    		String cursor = ScanParams.SCAN_POINTER_START;
+    		do {
+    			ScanResult<String> scanResult = redisClient.scan(cursor, params);
+    			List<String> keys = scanResult.getResult();
+    			if (!keys.isEmpty()) {
+    				deleted += redisClient.del(keys.toArray(new String[0]));
+    			}
+    			cursor = scanResult.getCursor();
+    		} while (!ScanParams.SCAN_POINTER_START.equals(cursor));
+    	}
+    	return deleted > 0;
     }
     
     
-    
-    public boolean ping()
-    {
-        boolean result = false;
-        try (JedisPooled redisClient = getJedisPooled())
-        {
-            redisClient.keys("*");
-            result = true;
-        }
-        return result;
+    public boolean ping() {
+    	boolean result = false;
+    	try (JedisPooled redisClient = getJedisPooled()) {
+    		redisClient.dbSize();
+    		result = true;
+    	} catch (Exception e) {
+    		LOG.debug(e);
+    	}
+    	return result;
     }
-      
     
     
     /**
@@ -259,17 +278,20 @@ public class ExtendRedisClient implements Serializable
      * 
      * return le nombre de clés.
      */
-    public int size(String pattern)
-    {
-        String internamPattern = StringUtil.isEmpty(pattern)?"*":pattern;
-        List<String> result  = new ArrayList<>();
-        try (JedisPooled redisClient = getJedisPooled())
-        {
-            result.addAll(redisClient.keys(internamPattern));
-        }
-        return result.size();
+    public int size(String pattern) {
+    	String matchPattern = StringUtil.isEmpty(pattern) ? "*" : pattern;
+    	int count = 0;
+    	try (JedisPooled redisClient = getJedisPooled()) {
+    		ScanParams params = new ScanParams().match(matchPattern).count(1000);
+    		String cursor = ScanParams.SCAN_POINTER_START;
+    		do {
+    			ScanResult<String> scanResult = redisClient.scan(cursor, params);
+    			count += scanResult.getResult().size();
+    			cursor = scanResult.getCursor();
+    		} while (!ScanParams.SCAN_POINTER_START.equals(cursor));
+    	}
+    	return count;
     }
-    
     
 
     /**
@@ -278,14 +300,28 @@ public class ExtendRedisClient implements Serializable
      * 
      * return true si la clé est présente.
      */
-    public boolean containsKey(String pattern)
-    {  
-        boolean result;
-        List<String> tmp  = getKeys(pattern);
-        result = !tmp.isEmpty();
-        return result;
+    public boolean containsKey(String pattern) {
+    	if (StringUtil.isEmpty(pattern)) {
+    		return false;
+    	}
+    	try (JedisPooled redisClient = getJedisPooled()) {
+    		// Chemin rapide : pas de wildcard -> EXISTS en O(1)
+    		if (!pattern.contains("*") && !pattern.contains("?") && !pattern.contains("[")) {
+    			return redisClient.exists(pattern);
+    	}
+    	// Sinon SCAN avec early exit dès qu'on trouve une clé
+    	ScanParams params = new ScanParams().match(pattern).count(100);
+    	String cursor = ScanParams.SCAN_POINTER_START;
+    	do {
+    		ScanResult<String> scanResult = redisClient.scan(cursor, params);
+    		if (!scanResult.getResult().isEmpty()) {
+    			return true;
+    		}
+    		cursor = scanResult.getCursor();
+    	} while (!ScanParams.SCAN_POINTER_START.equals(cursor));
+    	}
+    	return false;
     }
-        
     
     
     /**
@@ -307,15 +343,17 @@ public class ExtendRedisClient implements Serializable
         }
         return result;
     }
-    public boolean put(String key, String value, long ttl)
-    {
-        boolean result=put(key,value);
-        try (JedisPooled redisClient = getJedisPooled())
-        {
-            redisClient.pexpire(key, ttl);
-        }
-        result &= true;
-        return result;
+    public boolean put(String key, String value, long ttl) {
+    	 boolean result = false;
+    	 if (!StringUtil.isEmpty(key)) {
+    		 try (JedisPooled redisClient = getJedisPooled()) {
+    			 result = !StringUtil.isEmpty(redisClient.set(key, value));
+    			 if (result) {
+    				 redisClient.pexpire(key, ttl);
+    			 }
+    		 }
+    	 }
+    	 return result;
     }
     
     
@@ -342,17 +380,14 @@ public class ExtendRedisClient implements Serializable
         }
         return result;
     }
-    public boolean put(Map<String,String> entries, long ttl)
-    {
-        boolean result = put(entries);
-        for (String key : entries.keySet())
-        {
-            try (JedisPooled redisClient = getJedisPooled())
-            {
-                redisClient.pexpire(key, ttl);
-            }
-        }  
-        return result;
+    public boolean put(Map<String,String> entries, long ttl) {
+    	boolean result = put(entries);
+    	try (JedisPooled redisClient = getJedisPooled()) {
+    		for (String key : entries.keySet()) {
+    			redisClient.pexpire(key, ttl);
+    		}
+    	}
+    	return result;
     }
     
     
@@ -570,26 +605,48 @@ public class ExtendRedisClient implements Serializable
     
 
 
-    public JedisPooled getJedisPooled()
-    {
-        JedisPooled jedis = null;
-        if (StringUtil.isNotEmpty(redisUri))
-        {
-            try
-            {
-                jedis = new JedisPooled(poolConfig, new URI(redisUri));
-            }
-            catch (URISyntaxException e)
-            {
-                LOG.error(e);
-            }
-        }
-        else
-        {
-            jedis = new JedisPooled(poolConfig, host, port);
-        }
-        return jedis;
+
+    public JedisPooled getJedisPooled() {
+    	JedisPooled instance = cachedJedisPooled.get();
+    	if (instance == null) {
+    		synchronized (jedisLock) {
+    			instance = cachedJedisPooled.get();
+    			if (instance == null) {
+    				instance = createSharedJedisPooled();
+    				cachedJedisPooled.set(instance);
+    			}
+    		}
+    	}
+    	return instance;
     }
+
+
+
+    private JedisPooled createSharedJedisPooled() {
+    	if (StringUtil.isNotEmpty(redisUri)) {
+    		try {
+    			return new NonClosingJedisPooled(poolConfig, new URI(redisUri), 20000, 60000);
+    		} catch (URISyntaxException e) {
+    			LOG.error(e);
+    			throw new IllegalStateException("URI Redis invalide", e);
+    		}
+    	}
+    	return new NonClosingJedisPooled(
+    			poolConfig, URI.create("tcp://" + host + ":" + port), 20000, 60000);
+    }
+
+
+
+    @PreDestroy
+    public void shutdown() {
+    	JedisPooled instance = cachedJedisPooled.getAndSet(null);
+    	if (instance != null) {
+    		((NonClosingJedisPooled) instance).reallyClose();
+    	}
+    }
+
+
+
     
     
     
